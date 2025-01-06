@@ -8,7 +8,7 @@ from collections import defaultdict
 from pathlib import Path
 
 
-from splunk.persistconn.application import PersistentServerConnectionApplication
+from splunk.persistconn.application import PersistentServerConnectionApplication # type: ignore
 
 def setup_logger(level):
     logger = logging.getLogger('input_conf_generator_ds')
@@ -22,10 +22,11 @@ def setup_logger(level):
 logger = setup_logger(logging.DEBUG)
 
 class MyRestHandler(PersistentServerConnectionApplication):
-    
+    ###### customise path values if required  #####
+    #app name and serverclass name in handle funtion 
     directory_path = Path(os.environ.get('SPLUNK_HOME', '')) / 'etc' / 'deployment-apps'
     serverclass_directory = Path(os.environ.get('SPLUNK_HOME', '')) / 'etc' / 'apps' / 'input_conf_generator_serverclass' / 'local'
-
+    ###############################################
 
     def __init__(self, command_line, command_arg):
         super(MyRestHandler, self).__init__()
@@ -168,7 +169,7 @@ class MyRestHandler(PersistentServerConnectionApplication):
 #==============================================================================
 # Created by: input_conf_generator
 # Author: Vignesh Narendran
-# Creation Date: {current_time}
+# Update Date: {current_time}
 # Version: {version}
 # 
 # Description:
@@ -186,6 +187,20 @@ class MyRestHandler(PersistentServerConnectionApplication):
 
                 logger.info(f"Created app.conf file: {app_conf_path}")
             else: 
+                #to debug update time and version 
+                with open(app_conf_path, 'r') as f:
+                    lines = f.readlines()
+                    with open(app_conf_path, 'w') as f:
+                        for line in lines:
+                            if line.startswith('version'):
+                                f.write(f'version = {version}\n')
+                                logger.info(f"Updated version : {version} in app.conf file: {app_conf_path}")
+                            elif line.startswith('# Update Date:'):
+                                current_time = dt.now().strftime("%Y-%m-%d %H:%M:%S %Z")
+                                f.write(f'# Update Date: {current_time}\n')
+                                logger.info(f"Updated date : {current_time} in app.conf file: {app_conf_path}")
+                            else:
+                                f.write(line)
                 logger.info(f"App : {app_name} existing in the target {directory}, attempting to compare and add new inputs") 
 
             logger.debug(f"Path: {local_conf_path} | Configs : {configs}")
@@ -203,14 +218,15 @@ class MyRestHandler(PersistentServerConnectionApplication):
             return False
 
 
-    def compare_and_add_serverclass_whitelist_conf(self, env, app_name, index, sourcetype, hosts):
+    def compare_and_add_serverclass_whitelist_conf(self, app_name, serverclass_name, hosts):
+        
         logger.debug(f"Processing serverclass with hosts: {hosts}")
         current_time = dt.now().strftime("%Y-%m-%d %H:%M:%S %Z")
         
         os.makedirs(self.serverclass_directory, exist_ok=True)
         serverclass_path = os.path.join(self.serverclass_directory, 'serverclass.conf')
         logger.debug(f"Serverclass path: {serverclass_path}")
-        serverclass_name = f"{env}_{app_name}_{index}_{sourcetype}"
+        
         logger.debug(f"Serverclass name: {serverclass_name}")   
 
         existing_content = ""
@@ -288,22 +304,30 @@ stateOnClient = enabled
         return_payload_string = ""
         try:
             logger.info(f"Received payload: {in_string}")
-            index_name, message, precedence, my_sourcetype, app_name, environment, version, my_source, my_host = self.get_values(in_string)
+            index_name, message, precedence, my_sourcetypes, app_name, environment, version, my_sources, my_hosts = self.get_values(in_string)
 
             prefix_map = {"low": "z_", "normal": "y_", "high": "_"}
-            app_name = prefix_map[precedence] + index_name + "_" + app_name             
+
+            ###### Update app_name and serverclass name format here ###########
+            app_name = prefix_map[precedence] + environment + "_" + index_name + "_" + app_name             
+
+            serverclass_name = f"{app_name}_{index_name}_{my_sourcetypes}"
+
+            ###################################################################
 
 
             # perform all the calls from here, and get its status 
             if app_name:
                 return_payload_string += "Payload extract = success | "
-                configs = self.generate_configs(my_source, my_sourcetype, index_name)
+                configs = self.generate_configs(my_sources, my_sourcetypes, index_name)
                 if configs:
                     return_payload_string += "Generate config = success | "
                     config_write_status = self.write_configs_to_file(configs, app_name, version, message)
                     if config_write_status:
                         return_payload_string += f"Write config = {config_write_status} written | "
-                        serverclass_status = self.compare_and_add_serverclass_whitelist_conf(environment, app_name, index_name, my_sourcetype, my_host)
+                        
+
+                        serverclass_status = self.compare_and_add_serverclass_whitelist_conf(app_name, serverclass_name, my_hosts)
                         if serverclass_status:
                             return_payload_string += f"Write serverclass = {serverclass_status} | "
                         else:
@@ -343,6 +367,8 @@ stateOnClient = enabled
 
 
     def done(self):
+        logger.info("Request completed, payload processed")
+
         """
         Called after the request completes (optional).
         """
