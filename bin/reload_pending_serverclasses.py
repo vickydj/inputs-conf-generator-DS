@@ -48,7 +48,8 @@ def main(session_key):
         PENDING.parent.mkdir(parents=True, exist_ok=True)
         with PENDING.open('a') as f:
             f.write(''.join(f'{name}\n' for name in failed))
-    working.unlink(missing_ok=True)
+    if working.exists():  # unlink(missing_ok=) needs 3.8; Splunk 9.0-9.2 run 3.7
+        working.unlink()
     return failed
 
 

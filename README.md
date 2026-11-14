@@ -15,7 +15,7 @@
 - Every field is validated before it is written to `inputs.conf` or `serverclass.conf`.
   Bad input gets a `400` that lists the problems.
 - `submitted_by` (set by the SH from the Splunk session) is written in the comments of `inputs.conf` and `serverclass.conf`.
-- The request body is plain JSON (see the SH app). Requires Splunk Enterprise 10.2+ (Python 3.13/3.14).
+- The request body is plain JSON (see the SH app). Supports Splunk Enterprise 10.x and 9.x, Python 3 only (see the SH app).
 
 Every pull request runs `.github/workflows/validate.yml`. It fails if:
 - a test fails;
