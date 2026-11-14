@@ -16,8 +16,13 @@
   Bad input gets a `400` that lists the problems.
 - The request body is plain JSON (see the SH app). Requires Splunk Enterprise 10.2+ (Python 3.13/3.14).
 
-Every pull request runs `.github/workflows/validate.yml`. To run it locally:
-`python3 -m unittest discover -s tests && python3 ci/validate_app.py`.
+Every pull request runs `.github/workflows/validate.yml`. It fails if:
+- a test fails;
+- `local/`, `local.meta`, `*.backup`, a token, a `$7$` secret or a private key is committed;
+- a REST endpoint skips authentication, `web.conf` exposes an endpoint, or Python turns off TLS verification;
+- Splunk AppInspect (precert) reports any failure.
+
+Make **Validate Splunk app** a required status check on `master`. Locally, `python3 -m unittest discover -s tests` runs the tests.
 
 ## To do
 1. Create another handler to send phoning phone list to SH/ or log them and read from the dashboard app.
