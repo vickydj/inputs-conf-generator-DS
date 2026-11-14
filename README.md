@@ -4,6 +4,12 @@ Deployment-server half of the Input Conf Generator. It works together with
 [`input_conf_generator_sh`](https://github.com/vickydj/inputs-conf-generator-SH),
 which collects requests on a search head and sends them here.
 
+## Requirements
+
+* Splunk Enterprise **10.2+** with **Python 3.13 or 3.14**. Scripts declare
+  `python.required = 3.13, 3.14`. Python 2 and older Python 3 runtimes aren't supported.
+* Standard library only, no third-party dependencies.
+
 ## What it does
 
 `POST /services/receive_payload` (management port, JSON body). For each request it:
@@ -45,6 +51,8 @@ You can change the naming in `bin/input_conf_generator_lib.py`, in `build_app_na
 
 ## Development
 
+Use Python 3.13+.
+
 ```bash
 python3 -m unittest discover -s tests     # no Splunk installation required
 ```
@@ -59,6 +67,7 @@ and check the package with [Splunk AppInspect](https://dev.splunk.com/enterprise
 * **Breaking:** the endpoint now requires authentication and the `input_conf_generator_write`
   capability. The body is plain JSON (the single-quote/escape encoding has been removed). Upgrade both apps together.
 * `dry_run` mode for previews.
+* Python 3 only: targets Python 3.13/3.14 (`python.required`) on Splunk 10.2+.
 * Strict input validation (prevents stanza injection and path traversal).
 * Adding hosts to existing sources now works.
 * The `"higher"` precedence sent by older SH builds is accepted as `"high"`.
