@@ -14,6 +14,7 @@
 - Give the account whose token the SH app uses only the `input_conf_generator_sender` role.
 - Every field is validated before it is written to `inputs.conf` or `serverclass.conf`.
   Bad input gets a `400` that lists the problems.
+- `submitted_by` (set by the SH from the Splunk session) is written in the comments of `inputs.conf` and `serverclass.conf`.
 - The request body is plain JSON (see the SH app). Requires Splunk Enterprise 10.2+ (Python 3.13/3.14).
 
 Every pull request runs `.github/workflows/validate.yml`. It fails if:
@@ -24,17 +25,17 @@ Every pull request runs `.github/workflows/validate.yml`. It fails if:
 
 Make **Validate Splunk app** a required status check on `master`. Locally, `python3 -m unittest discover -s tests` runs the tests.
 
+## Server class reload
+
+Each server class that a payload creates or changes is queued in `$SPLUNK_HOME/var/run/input_conf_generator_ds/pending_reload`.
+The scripted input `bin/reload_pending_serverclasses.py` (every 300 s, `default/inputs.conf`) reloads only those classes and
+keeps any that fail for the next run. Change `interval` in `local/inputs.conf` to reload more or less often.
+
+## Phoning-home clients
+
+The SH reads the client list from the DS's own `/services/deployment/server/clients` endpoint with its token
+(the `input_conf_generator_sender` role has `list_deployment_server`), so this app needs no extra handler.
+
 ## To do
-1. Create another handler to send phoning phone list to SH/ or log them and read from the dashboard app.
-2. Keep track of updated serverclass, reload them at an interval.
-
-
-To modify the below 
-
-# to do 
-create ability to delete source/app probably in a new endpoint
-create ability to update source/app probably in a new endpoint
-
-validate :
-app name - can't have space 
-any fields can't have space
+- Delete a source/app, probably in a new endpoint.
+- Update a source/app, probably in a new endpoint.
