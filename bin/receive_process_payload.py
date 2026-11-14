@@ -19,7 +19,47 @@ def setup_logger(level):
     logger.addHandler(handler)
     return logger
 
-logger = setup_logger(logging.DEBUG)
+logger = setup_logger(logging.INFO)
+
+NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$')
+INDEX_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,79}$')
+SOURCETYPE_RE = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,99}$')
+HOST_RE = re.compile(r'^[A-Za-z0-9*][A-Za-z0-9_.*:-]{0,252}$')
+VERSION_RE = re.compile(r'^\d{1,4}(\.\d{1,4}){0,3}$')
+CONTROL_RE = re.compile(r'[\x00-\x1f\x7f]')
+ABSOLUTE_RE = re.compile(r'^(/|[A-Za-z]:[\\/]|\\\\)')
+PREFIX_MAP = {"low": "z_", "normal": "y_", "high": "_"}
+
+
+def validation_errors(index_name, message, precedence, sourcetype, app_name, environment, version, sources, hosts):
+    """Values below are written verbatim into inputs.conf / serverclass.conf, so a newline,
+    a trailing backslash (line continuation) or a '/' in a name would inject config or
+    escape etc/deployment-apps. Returns a list of problems (empty means valid)."""
+    errors = []
+    if not isinstance(message, str) or not message.strip() or CONTROL_RE.search(message):
+        errors.append("message is required and must be a single line")
+    if precedence not in PREFIX_MAP:
+        errors.append(f"precedence must be one of {sorted(PREFIX_MAP)}")
+    for label, value, pattern in (("my_index", index_name, INDEX_RE), ("my_sourcetype", sourcetype, SOURCETYPE_RE),
+                                  ("app_name", app_name, NAME_RE), ("environment", environment, NAME_RE),
+                                  ("version", version or "1.0.0", VERSION_RE)):
+        if not isinstance(value, str) or not pattern.match(value):
+            errors.append(f"{label} has invalid characters")
+    if not isinstance(sources, list) or not sources:
+        errors.append("my_source must be a non-empty list")
+    else:
+        for src in sources:
+            if (not isinstance(src, str) or CONTROL_RE.search(src) or src.endswith("\\")
+                    or not ABSOLUTE_RE.match(src) or len(src) > 1024):
+                errors.append(f"source {src!r} must be a single-line absolute path not ending in a backslash")
+    if not isinstance(hosts, list) or not hosts:
+        errors.append("my_host must be a non-empty list")
+    else:
+        for host in hosts:
+            if not isinstance(host, str) or not HOST_RE.match(host) or not re.search(r'[A-Za-z0-9]', host):
+                errors.append(f"host {host!r} is invalid (wildcard-only patterns would match every client)")
+    return errors
+
 
 class MyRestHandler(PersistentServerConnectionApplication):
     ###### customise path values if required  #####
@@ -32,32 +72,12 @@ class MyRestHandler(PersistentServerConnectionApplication):
         super(MyRestHandler, self).__init__()
 
     def get_values(self, in_string):
-        logger.debug(f"Received payload: {in_string}")
         try:
             # Decode the first level JSON
             outer_json = json.loads(in_string)
-            logger.debug(f"Parsed outer JSON: {outer_json}")
             
-            # Decode the payload wrapper (second level JSON)
-            payload_wrapper = json.loads(outer_json.get('payload', '{}'))
-            logger.debug(f"Parsed payload wrapper: {payload_wrapper}")
-            
-            # Handle additional escaping in the payload content (third level JSON)
-            payload_raw = payload_wrapper.get('payload', '{}')
-            logger.debug(f"Raw payload content before final parse 1: {payload_raw}")
-            
-            # Clean up the payload string
-            payload_cleaned = payload_raw.strip('"\'')
-            payload_cleaned = payload_cleaned.replace("\\'", '"')
-            payload_cleaned = payload_cleaned.replace('\\n', '\n')
-            payload_cleaned = payload_cleaned.replace('\\\"', '"')
-            payload_cleaned = payload_cleaned.replace('\\\\', '\\')
-            payload_cleaned = payload_cleaned.encode().decode('unicode_escape')
-            
-            logger.debug(f"Cleaned payload: {payload_cleaned}")
-            
-            # Parse the cleaned JSON
-            payload_json = json.loads(payload_cleaned)
+            # The request body is the payload as plain JSON.
+            payload_json = json.loads(outer_json.get('payload') or '{}')
 
             
             # Extract required values with default fallbacks
@@ -80,12 +100,8 @@ class MyRestHandler(PersistentServerConnectionApplication):
             
             return index_name, message, precedence, my_sourcetype, app_name, environment, version, my_source, my_host
 
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON decoding error: {str(e)}")
-            raise ValueError(f"Failed to decode JSON: {str(e)}")
-        except Exception as e:
-            logger.error(f"Unexpected error in get_values: {str(e)}")
-            raise ValueError(f"Unexpected error: {str(e)}")
+        except (ValueError, AttributeError) as e:
+            raise ValueError(f"Invalid payload: {e}")
 
     def generate_configs(self, sources, sourcetype, index):
         logger.debug(f"Generate config {sources,sourcetype,index}")
@@ -218,6 +234,7 @@ class MyRestHandler(PersistentServerConnectionApplication):
             return False
 
 
+    # shortcut: no file lock, two requests in the same instant can lose a write; add a lock if many people submit at once.
     def compare_and_add_serverclass_whitelist_conf(self, app_name, serverclass_name, hosts):
         
         logger.debug(f"Processing serverclass with hosts: {hosts}")
@@ -303,13 +320,17 @@ stateOnClient = enabled
 
         return_payload_string = ""
         try:
-            logger.info(f"Received payload: {in_string}")
             index_name, message, precedence, my_sourcetypes, app_name, environment, version, my_sources, my_hosts = self.get_values(in_string)
 
-            prefix_map = {"low": "z_", "normal": "y_", "high": "_"}
+            errors = validation_errors(index_name, message, precedence, my_sourcetypes, app_name,
+                                       environment, version, my_sources, my_hosts)
+            if errors:
+                logger.warning(f"Rejected payload: {errors}")
+                return {'payload': {"status": "error", "message": "Validation failed", "errors": errors}, 'status': 400}
+            version = version or "1.0.0"
 
             ###### Update app_name and serverclass name format here ###########
-            app_name = prefix_map[precedence] + environment + "_" + index_name + "_" + app_name             
+            app_name = PREFIX_MAP[precedence] + environment + "_" + index_name + "_" + app_name
 
             serverclass_name = f"{app_name}_{index_name}_{my_sourcetypes}"
 
@@ -323,7 +344,8 @@ stateOnClient = enabled
                 if configs:
                     return_payload_string += "Generate config = success | "
                     config_write_status = self.write_configs_to_file(configs, app_name, version, message)
-                    if config_write_status:
+                    # 0 means "every source already existed"; still add any new hosts.
+                    if config_write_status is not False:
                         return_payload_string += f"Write config = {config_write_status} written | "
                         
 
@@ -342,19 +364,20 @@ stateOnClient = enabled
    
             return_payload_string += "..."
 
+            failed = "failed" in return_payload_string
             return {
                 'payload': {
-                    "status": "success",
-                    "message": "Payload received and logged.",
+                    "status": "error" if failed else "success",
+                    "message": "Writing the configuration failed; see input_conf_generator_ds.log" if failed else "Payload received and logged.",
                     "Script_status": return_payload_string
                 },
-                'status': 200
+                'status': 500 if failed else 200
             }
 
-        except json.JSONDecodeError:
-            logger.error("Invalid JSON format")
+        except ValueError as e:
+            logger.error(f"Invalid payload: {e}")
             return {
-                'payload': {"status": "error", "message": "Invalid JSON format."},
+                'payload': {"status": "error", "message": str(e)},
                 'status': 400
             }
 

@@ -1,3 +1,11 @@
 # Python bytecode
-*.py[cod]     # This will match .pyc, .pyo and .pyd files
-__pycache__/  # Ignore the whole pycache directory
+*.py[cod]
+__pycache__/
+
+# Instance state and build output
+local/
+metadata/local.meta
+*.backup
+dist/
+*.tgz
+*.spl
