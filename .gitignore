@@ -1,3 +1,10 @@
 # Python bytecode
-*.py[cod]     # This will match .pyc, .pyo and .pyd files
-__pycache__/  # Ignore the whole pycache directory
+*.py[cod]
+__pycache__/
+
+# Instance-specific state must never be committed or packaged
+local/
+metadata/local.meta
+*.backup
+*.tar.gz
+*.spl
