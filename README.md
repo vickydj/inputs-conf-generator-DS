@@ -8,6 +8,22 @@
   
     Checks for existing app/conf files and adds only new updates. Duplicates are ignored.
 
+## Security
+
+- `/services/receive_payload` requires a login with the `input_conf_generator_write` capability (`default/authorize.conf`).
+- Give the account whose token the SH app uses only the `input_conf_generator_sender` role.
+- Every field is validated before it is written to `inputs.conf` or `serverclass.conf`.
+  Bad input gets a `400` that lists the problems.
+- The request body is plain JSON (see the SH app). Requires Splunk Enterprise 10.2+ (Python 3.13/3.14).
+
+Every pull request runs `.github/workflows/validate.yml`. It fails if:
+- a test fails;
+- `local/`, `local.meta`, `*.backup`, a token, a `$7$` secret or a private key is committed;
+- a REST endpoint skips authentication, `web.conf` exposes an endpoint, or Python turns off TLS verification;
+- Splunk AppInspect (precert) reports any failure.
+
+Make **Validate Splunk app** a required status check on `master`. Locally, `python3 -m unittest discover -s tests` runs the tests.
+
 ## To do
 1. Create another handler to send phoning phone list to SH/ or log them and read from the dashboard app.
 2. Keep track of updated serverclass, reload them at an interval.
