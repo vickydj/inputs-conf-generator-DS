@@ -25,6 +25,17 @@ Every pull request runs `.github/workflows/validate.yml`. It fails if:
 
 Make **Validate Splunk app** a required status check on `master`. Locally, `python3 -m unittest discover -s tests` runs the tests.
 
+## Upgrading from 1.0.x
+
+Upgrade this DS app **before** the SH app. The DS accepts payloads from SH 1.0.x and 1.1+; DS 1.0.x cannot read SH 1.1+.
+
+- Server class names no longer contain `:`. It is replaced by `_`: sourcetype `nginx:access` gives `..._nginx_access`.
+  Classes made by older releases keep their old names. Resubmitting creates the new class with all its hosts.
+  Then delete the old class from `etc/apps/input_conf_generator_serverclass/local/serverclass.conf`.
+- Generated deployment apps now get real `[launcher] version` and `[package] id` stanzas in `app.conf`.
+  Comment-only `app.conf` files from older releases are rewritten on the next request for that app.
+  The version only moves forward. Timestamps in generated comments are UTC.
+
 ## Server class reload
 
 Each server class that a payload creates or changes is queued in `$SPLUNK_HOME/var/run/input_conf_generator_ds/pending_reload`.

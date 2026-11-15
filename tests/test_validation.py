@@ -65,6 +65,64 @@ class HandlerTests(unittest.TestCase):
         self.send(body)
         self.assertEqual(PENDING_RELOAD.read_text(), "y_qa_os_linux_os_syslog\n")
 
+    def body(self, **change):
+        base = {"message": "RFC9", "precedence": "high", "my_index": "web", "my_sourcetype": "nginx:access",
+                "my_source": ["/var/log/nginx/access.log"], "my_host": ["web01"], "submitted_by": "alice",
+                "additional_metadata": {"app_name": "nginx", "environment": "prod", "version": "1.0.0"}}
+        base.update(change)
+        return base
+
+    def app_dir(self, name):
+        return Path(HOME, "etc", "deployment-apps", name, "default")
+
+    def test_sh_1_0_payload_format_is_accepted(self):
+        inner = self.body(additional_metadata={"app_name": "legacy", "environment": "prod"})
+        del inner["submitted_by"]
+        for wrapped in ({"payload": json.dumps(inner)}, {"payload": json.dumps(json.dumps(inner))}):
+            result = self.send(wrapped)
+            self.assertEqual(result["status"], 200, result)
+        self.assertIn("Submitted by : unknown", (self.app_dir("_prod_web_legacy") / "inputs.conf").read_text())
+
+    def test_colon_in_sourcetype_does_not_reach_serverclass_name(self):
+        PENDING_RELOAD.unlink(missing_ok=True)
+        self.send(self.body(additional_metadata={"app_name": "colon", "environment": "prod"}))
+        sc = Path(HOME, "etc", "apps", "input_conf_generator_serverclass", "local", "serverclass.conf").read_text()
+        self.assertIn("[serverClass:_prod_web_colon_web_nginx_access:app:_prod_web_colon]", sc)
+        self.assertNotIn("nginx:access", sc)
+        self.assertEqual(PENDING_RELOAD.read_text(), "_prod_web_colon_web_nginx_access\n")
+        self.assertIn("sourcetype = nginx:access", (self.app_dir("_prod_web_colon") / "inputs.conf").read_text())
+
+    def test_app_conf_has_a_real_version_that_only_moves_forward(self):
+        app_conf = self.app_dir("_prod_web_ver") / "app.conf"
+        meta = lambda v: {"app_name": "ver", "environment": "prod", "version": v}
+        self.send(self.body(additional_metadata=meta("1.0.0")))
+        text = app_conf.read_text()
+        self.assertIn("[launcher]\nauthor = input_conf_generator", text)
+        self.assertIn("version = 1.0.0", text)
+        self.assertIn("[package]\nid = _prod_web_ver", text)
+        self.assertTrue(text.endswith("\n"))
+        self.send(self.body(my_source=["/var/log/b.log"], additional_metadata=meta("1.10.0")))
+        self.assertIn("version = 1.10.0", app_conf.read_text())
+        self.assertIn("# Version: 1.10.0", app_conf.read_text())
+        self.send(self.body(my_source=["/var/log/c.log"], additional_metadata=meta("1.9.0")))
+        self.assertIn("version = 1.10.0", app_conf.read_text())
+
+    def test_comment_only_app_conf_from_older_releases_is_upgraded(self):
+        app_conf = self.app_dir("_prod_web_old") / "app.conf"
+        app_conf.parent.mkdir(parents=True)
+        app_conf.write_text("#===\n# Update Date: 2025-01-01 00:00:00 \n# Version: 1.2.0\n#===")
+        self.send(self.body(additional_metadata={"app_name": "old", "environment": "prod", "version": "1.0.0"}))
+        self.assertIn("[launcher]", app_conf.read_text())
+        self.assertIn("version = 1.2.0", app_conf.read_text())
+
+    def test_timestamps_name_their_time_zone(self):
+        self.send(self.body(additional_metadata={"app_name": "tz", "environment": "prod"}))
+        inputs = (self.app_dir("_prod_web_tz") / "inputs.conf").read_text()
+        sc = Path(HOME, "etc", "apps", "input_conf_generator_serverclass", "local", "serverclass.conf").read_text()
+        self.assertRegex(inputs, r"Created at \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC\n")
+        self.assertRegex(sc, r"# Added on \S+ \S+ UTC by alice\n")
+        self.assertNotIn(" \n", inputs + sc + (self.app_dir("_prod_web_tz") / "app.conf").read_text())
+
     def test_write_failure_is_reported(self):
         body = {"message": "RFC2", "precedence": "low", "my_index": "web", "my_sourcetype": "st",
                 "my_source": ["/var/log/b.log"], "my_host": ["web03"],
