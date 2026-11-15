@@ -29,15 +29,27 @@ VERSION_RE = re.compile(r'^\d{1,4}(\.\d{1,4}){0,3}$')
 CONTROL_RE = re.compile(r'[\x00-\x1f\x7f]')
 ABSOLUTE_RE = re.compile(r'^(/|[A-Za-z]:[\\/]|\\\\)')
 PREFIX_MAP = {"low": "z_", "normal": "y_", "high": "_"}
+# Server classes changed since the last reload; bin/reload_pending_serverclasses.py consumes it.
+PENDING_RELOAD = Path(os.environ.get('SPLUNK_HOME', '')) / 'var' / 'run' / 'input_conf_generator_ds' / 'pending_reload'
 
 
-def validation_errors(index_name, message, precedence, sourcetype, app_name, environment, version, sources, hosts):
+def queue_reload(serverclass_name):
+    PENDING_RELOAD.parent.mkdir(parents=True, exist_ok=True)
+    with PENDING_RELOAD.open('a') as f:
+        f.write(serverclass_name + '\n')
+
+
+def validation_errors(index_name, message, precedence, sourcetype, app_name, environment, version, sources, hosts,
+                      submitted_by=""):
     """Values below are written verbatim into inputs.conf / serverclass.conf, so a newline,
     a trailing backslash (line continuation) or a '/' in a name would inject config or
     escape etc/deployment-apps. Returns a list of problems (empty means valid)."""
     errors = []
     if not isinstance(message, str) or not message.strip() or CONTROL_RE.search(message):
         errors.append("message is required and must be a single line")
+    if (not isinstance(submitted_by, str) or CONTROL_RE.search(submitted_by) or submitted_by.endswith("\\")
+            or len(submitted_by) > 100):
+        errors.append("submitted_by must be a single line of at most 100 characters")
     if precedence not in PREFIX_MAP:
         errors.append(f"precedence must be one of {sorted(PREFIX_MAP)}")
     for label, value, pattern in (("my_index", index_name, INDEX_RE), ("my_sourcetype", sourcetype, SOURCETYPE_RE),
@@ -93,12 +105,14 @@ class MyRestHandler(PersistentServerConnectionApplication):
             app_name = additional_metadata.get('app_name', '')
             environment = additional_metadata.get('environment', '')
             version = additional_metadata.get('version', '')
+            # Set by the SH from the Splunk session of the user who pressed Submit.
+            submitted_by = payload_json.get('submitted_by', '')
             
             logger.debug(f"Extracted values: message={message}, precedence={precedence}, index_name={index_name}, "
                         f"sourcetype={my_sourcetype}, sources={my_source}, hosts={my_host}, "
-                        f"app_name={app_name}, environment={environment}, version={version}")
-            
-            return index_name, message, precedence, my_sourcetype, app_name, environment, version, my_source, my_host
+                        f"app_name={app_name}, environment={environment}, version={version}, submitted_by={submitted_by}")
+
+            return index_name, message, precedence, my_sourcetype, app_name, environment, version, my_source, my_host, submitted_by
 
         except (ValueError, AttributeError) as e:
             raise ValueError(f"Invalid payload: {e}")
@@ -116,7 +130,7 @@ class MyRestHandler(PersistentServerConnectionApplication):
         return configs
 
 
-    def compare_and_update_input_configs(self, local_conf_path, configs, message):
+    def compare_and_update_input_configs(self, local_conf_path, configs, message, submitted_by="unknown"):
         existing_configs = defaultdict(list)
         if local_conf_path.exists():
             logger.info(f"Reading existing configs from {local_conf_path}")
@@ -143,7 +157,7 @@ class MyRestHandler(PersistentServerConnectionApplication):
             logger.info(f"Attempting to write new configs : {local_conf_path}")
             with local_conf_path.open('a') as f:
                 
-                f.write(f'\n# *** Start of inputs from : {message} : Created at {dt.now().strftime("%Y-%m-%d %H:%M:%S %Z")}\n')
+                f.write(f'\n# *** Start of inputs from : {message} : Submitted by : {submitted_by} : Created at {dt.now().strftime("%Y-%m-%d %H:%M:%S %Z")}\n')
                 
                 for stanza, lines in new_configs.items():
                     f.write(f"{stanza}\n")
@@ -155,7 +169,7 @@ class MyRestHandler(PersistentServerConnectionApplication):
 
         return len(new_configs)
 
-    def write_configs_to_file(self, configs, app_name, version, message, filename=None):
+    def write_configs_to_file(self, configs, app_name, version, message, filename=None, submitted_by="unknown"):
         if filename is None:
             
             directory = self.directory_path / app_name / 'default'
@@ -220,7 +234,7 @@ class MyRestHandler(PersistentServerConnectionApplication):
                 logger.info(f"App : {app_name} existing in the target {directory}, attempting to compare and add new inputs") 
 
             logger.debug(f"Path: {local_conf_path} | Configs : {configs}")
-            new_configs_len=self.compare_and_update_input_configs(local_conf_path, configs, message)
+            new_configs_len=self.compare_and_update_input_configs(local_conf_path, configs, message, submitted_by)
             action = "Created new" if is_new_directory else "Appended new configurations to"
             logger.info(f"{action} inputs.conf file: {local_conf_path}")
             logger.info(f"Added {new_configs_len} new configurations.")
@@ -235,7 +249,7 @@ class MyRestHandler(PersistentServerConnectionApplication):
 
 
     # shortcut: no file lock, two requests in the same instant can lose a write; add a lock if many people submit at once.
-    def compare_and_add_serverclass_whitelist_conf(self, app_name, serverclass_name, hosts):
+    def compare_and_add_serverclass_whitelist_conf(self, app_name, serverclass_name, hosts, submitted_by="unknown"):
         
         logger.debug(f"Processing serverclass with hosts: {hosts}")
         current_time = dt.now().strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -279,7 +293,7 @@ class MyRestHandler(PersistentServerConnectionApplication):
 
         if not server_class_exists:
             logger.info(f"Creating new server class configuration for {serverclass_name}")
-            content = f"""\n# Added on {current_time}
+            content = f"""\n# Added on {current_time} by {submitted_by}
 [serverClass:{serverclass_name}:app:{app_name}]
 restartSplunkWeb = 0
 restartSplunkd = 1
@@ -293,12 +307,12 @@ stateOnClient = enabled
             with open(serverclass_path, 'a') as f:
                 f.write(content)
             logger.info(f"Added new server class configuration for {serverclass_name}")
-            # self.reload_deploy_server(serverclass_name)
+            queue_reload(serverclass_name)
             return "New class added"
 
         elif new_hosts:
             logger.info(f"Adding new hosts to existing server class configuration for {serverclass_name}")
-            content = f"""# Updated on {current_time}\n"""
+            content = f"""# Updated on {current_time} by {submitted_by}\n"""
             for i, hostname in enumerate(new_hosts, start=max_whitelist_num + 1):
                 content += f"whitelist.{i} = {hostname}\n"
             updated_content = existing_content[:app_stanza_end] + content + existing_content[app_stanza_end:]
@@ -307,8 +321,7 @@ stateOnClient = enabled
                 f.write(updated_content)
 
             logger.info(f"Added {len(new_hosts)} new hosts to existing server class {serverclass_name}")
-
-            # self.reload_deploy_server(serverclass_name)
+            queue_reload(serverclass_name)
             return "existing class updated"
 
         else:
@@ -320,14 +333,16 @@ stateOnClient = enabled
 
         return_payload_string = ""
         try:
-            index_name, message, precedence, my_sourcetypes, app_name, environment, version, my_sources, my_hosts = self.get_values(in_string)
+            (index_name, message, precedence, my_sourcetypes, app_name, environment, version, my_sources, my_hosts,
+             submitted_by) = self.get_values(in_string)
 
             errors = validation_errors(index_name, message, precedence, my_sourcetypes, app_name,
-                                       environment, version, my_sources, my_hosts)
+                                       environment, version, my_sources, my_hosts, submitted_by)
             if errors:
                 logger.warning(f"Rejected payload: {errors}")
                 return {'payload': {"status": "error", "message": "Validation failed", "errors": errors}, 'status': 400}
             version = version or "1.0.0"
+            submitted_by = submitted_by.strip() or "unknown"
 
             ###### Update app_name and serverclass name format here ###########
             app_name = PREFIX_MAP[precedence] + environment + "_" + index_name + "_" + app_name
@@ -343,13 +358,13 @@ stateOnClient = enabled
                 configs = self.generate_configs(my_sources, my_sourcetypes, index_name)
                 if configs:
                     return_payload_string += "Generate config = success | "
-                    config_write_status = self.write_configs_to_file(configs, app_name, version, message)
+                    config_write_status = self.write_configs_to_file(configs, app_name, version, message, submitted_by=submitted_by)
                     # 0 means "every source already existed"; still add any new hosts.
                     if config_write_status is not False:
                         return_payload_string += f"Write config = {config_write_status} written | "
                         
 
-                        serverclass_status = self.compare_and_add_serverclass_whitelist_conf(app_name, serverclass_name, my_hosts)
+                        serverclass_status = self.compare_and_add_serverclass_whitelist_conf(app_name, serverclass_name, my_hosts, submitted_by)
                         if serverclass_status:
                             return_payload_string += f"Write serverclass = {serverclass_status} | "
                         else:
