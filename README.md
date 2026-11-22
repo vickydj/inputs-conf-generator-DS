@@ -7,9 +7,10 @@ This add-on runs on the **deployment server (DS)**. It receives onboarding reque
 which runs on a search head. For each request it:
 
 1. creates or updates a deployment app in `$SPLUNK_HOME/etc/deployment-apps/` with `[monitor://...]` stanzas in `inputs.conf`;
-2. creates or updates a server class in `$SPLUNK_HOME/etc/apps/input_conf_generator_serverclass/local/serverclass.conf`
-   that maps the requested hosts to that app;
-3. reloads only the server classes it changed, so forwarders pick up the new inputs.
+2. creates or updates a server class that maps the requested hosts to that app, through the deployment server's own REST
+   API (`/services/deployment/server/serverclasses` and `/applications`). Splunk stores it in
+   `$SPLUNK_HOME/etc/apps/input_conf_generator_ds/local/serverclass.conf`, and it shows in Forwarder Management;
+3. reloads only the server classes it changed, so forwarders pick up new or changed inputs.
 
 Existing stanzas and hosts are never duplicated or removed.
 
@@ -61,8 +62,8 @@ Optional, in `local/inputs.conf`: the server class reload runs every 300 seconds
 | precedence `low` / `normal` / `high` | App name prefix `z_` / `y_` / `_` (alphabetical order decides config precedence) |
 | environment, index, app name | Deployment app `<prefix><environment>_<index>_<app name>` |
 | sources | One `[monitor://<source>]` stanza each, with `index`, `sourcetype` and `disabled = false` |
-| hosts | `whitelist.N` entries of server class `<app>_<index>_<sourcetype>` (wildcards such as `web*` allowed) |
-| message, submitted_by | Comments in `inputs.conf` and `serverclass.conf`, so every change can be traced to a request and a user |
+| hosts | `whitelist.N` entries of server class `<app>_<index>_<sourcetype>` (wildcards such as `web*` allowed; characters other than letters, digits, `_ . -` in the name become `_`) |
+| message, submitted_by | Comments in `inputs.conf` and lines in `input_conf_generator_ds.log`, so every change can be traced to a request and a user |
 
 The indexes must already exist on the indexers.
 
@@ -93,6 +94,10 @@ Logs:
 1.1.0 changes the protocol and requires authentication, so the DS add-on and the SH app must both be upgraded to 1.1.0.
 After upgrading, create the user and token above and re-run the SH app's setup page.
 
+1.0.x wrote server classes to `$SPLUNK_HOME/etc/apps/input_conf_generator_serverclass/local/serverclass.conf`, which the
+deployment server did not load. To keep those requests, submit them again from the SH app (existing sources and hosts
+are not duplicated), then delete the `input_conf_generator_serverclass` folder.
+
 ## Support
 
 Developer supported. Open an issue at <https://github.com/vickydj/inputs-conf-generator-DS/issues>.
@@ -113,8 +118,10 @@ It fails if:
   accepts anonymous requests, and it is no longer exposed through Splunk Web.
 - New role `input_conf_generator_sender` for the SH app's token.
 - All fields are validated; invalid requests get HTTP 400 with the list of problems.
-- Records the submitting user in `inputs.conf` and `serverclass.conf`.
-- Reloads only the server classes that changed (scripted input, every 300 s).
+- Fix: server classes are created through the deployment server REST API. 1.0.x wrote them to
+  `etc/apps/input_conf_generator_serverclass`, which the deployment server did not load, so forwarders never received the apps.
+- Records the submitting user in `inputs.conf` and in the add-on's log.
+- Reloads only the server classes that changed, including when only new sources were added (scripted input, every 300 s).
 - The request body is plain JSON.
 - Updates the version comment in the deployment app's `app.conf` when a request is sent again with a new version.
 - Python 3 only; Splunk Enterprise 9.3 – 10.6.

@@ -6,8 +6,10 @@ import json
 import re
 from collections import defaultdict
 from pathlib import Path
+from urllib.parse import quote
 
 
+import splunk.rest  # type: ignore  # ships with Splunk
 from splunk.persistconn.application import PersistentServerConnectionApplication # type: ignore
 
 def setup_logger(level):
@@ -31,6 +33,29 @@ ABSOLUTE_RE = re.compile(r'^(/|[A-Za-z]:[\\/]|\\\\)')
 PREFIX_MAP = {"low": "z_", "normal": "y_", "high": "_"}
 # Server classes changed since the last reload; bin/reload_pending_serverclasses.py consumes it.
 PENDING_RELOAD = Path(os.environ.get('SPLUNK_HOME', '')) / 'var' / 'run' / 'input_conf_generator_ds' / 'pending_reload'
+
+
+def whitelist_index(key):
+    """3 for 'whitelist.3', -1 for any other key."""
+    m = re.fullmatch(r'whitelist\.(\d+)', key)
+    return int(m.group(1)) if m else -1
+
+
+def ds_rest(session_key, method, path, **postargs):
+    """Calls this splunkd's REST API in this app's namespace. Returns (status, entry content dict)."""
+    try:
+        response, content = splunk.rest.simpleRequest(
+            "/servicesNS/nobody/input_conf_generator_ds" + path, sessionKey=session_key, method=method,
+            postargs=postargs or None, getargs={"output_mode": "json"}, raiseAllErrors=False)
+    except Exception as e:  # simpleRequest raises for 404 even with raiseAllErrors=False
+        if type(e).__name__ == "ResourceNotFound":
+            return 404, {}
+        raise
+    try:
+        entries = json.loads(content or b"{}").get("entry") or [{}]
+    except ValueError:
+        entries = [{}]
+    return response.status, entries[0].get("content", {})
 
 
 def queue_reload(serverclass_name):
@@ -77,7 +102,6 @@ class MyRestHandler(PersistentServerConnectionApplication):
     ###### customise path values if required  #####
     #app name and serverclass name in handle funtion 
     directory_path = Path(os.environ.get('SPLUNK_HOME', '')) / 'etc' / 'deployment-apps'
-    serverclass_directory = Path(os.environ.get('SPLUNK_HOME', '')) / 'etc' / 'apps' / 'input_conf_generator_serverclass' / 'local'
     ###############################################
 
     def __init__(self, command_line, command_arg):
@@ -248,86 +272,43 @@ class MyRestHandler(PersistentServerConnectionApplication):
             return False
 
 
-    # shortcut: no file lock, two requests in the same instant can lose a write; add a lock if many people submit at once.
-    def compare_and_add_serverclass_whitelist_conf(self, app_name, serverclass_name, hosts, submitted_by="unknown"):
-        
-        logger.debug(f"Processing serverclass with hosts: {hosts}")
-        current_time = dt.now().strftime("%Y-%m-%d %H:%M:%S %Z")
-        
-        os.makedirs(self.serverclass_directory, exist_ok=True)
-        serverclass_path = os.path.join(self.serverclass_directory, 'serverclass.conf')
-        logger.debug(f"Serverclass path: {serverclass_path}")
-        
-        logger.debug(f"Serverclass name: {serverclass_name}")   
-
-        existing_content = ""
-        existing_hosts = set()
-        max_whitelist_num = -1
-        server_class_exists = False
-        app_stanza_start = None
-        app_stanza_end = None
-
-        # Read existing content and check for the server class
-        if os.path.exists(serverclass_path):
-            with open(serverclass_path, 'r') as f:
-                existing_content = f.read()
-                app_stanza_pattern = re.compile(rf'\[serverClass:{re.escape(serverclass_name)}\](.*?)(?=\n\[|\Z)', re.DOTALL)
-
-                match = app_stanza_pattern.search(existing_content)
-                logger.debug(f"App stanza pattern match: {match}")
-                if match:
-                    logger.info(f"Found existing server class configuration for {serverclass_name}")
-                    server_class_exists = True
-                    app_stanza_start = match.start()
-                    app_stanza_end = match.end()
-                    whitelist_pattern = re.compile(rf'whitelist\.(\d+)\s*=\s*(\S+)')
-                    for match in whitelist_pattern.finditer(match.group(1)):
-                        num, host = match.groups()
-                        existing_hosts.add(host)
-                        max_whitelist_num = max(max_whitelist_num, int(num))
-
-        # Filter out existing hosts and create list of new hosts
-        new_hosts = [host for host in hosts if host not in existing_hosts]
-        logger.debug(f"Existing hosts: {existing_hosts}")
-        logger.debug(f"New hosts to add: {new_hosts}")
-
-        if not server_class_exists:
-            logger.info(f"Creating new server class configuration for {serverclass_name}")
-            content = f"""\n# Added on {current_time} by {submitted_by}
-[serverClass:{serverclass_name}:app:{app_name}]
-restartSplunkWeb = 0
-restartSplunkd = 1
-stateOnClient = enabled
-
-[serverClass:{serverclass_name}]
-"""
-            for i, hostname in enumerate(new_hosts):
-                content += f"whitelist.{i} = {hostname}\n"
-
-            with open(serverclass_path, 'a') as f:
-                f.write(content)
-            logger.info(f"Added new server class configuration for {serverclass_name}")
-            queue_reload(serverclass_name)
-            return "New class added"
-
-        elif new_hosts:
-            logger.info(f"Adding new hosts to existing server class configuration for {serverclass_name}")
-            content = f"""# Updated on {current_time} by {submitted_by}\n"""
-            for i, hostname in enumerate(new_hosts, start=max_whitelist_num + 1):
-                content += f"whitelist.{i} = {hostname}\n"
-            updated_content = existing_content[:app_stanza_end] + content + existing_content[app_stanza_end:]
-
-            with open(serverclass_path, 'w') as f:
-                f.write(updated_content)
-
-            logger.info(f"Added {len(new_hosts)} new hosts to existing server class {serverclass_name}")
-            queue_reload(serverclass_name)
-            return "existing class updated"
-
+    def apply_serverclass(self, session_key, app_name, serverclass_name, hosts, submitted_by="unknown"):
+        """Creates or extends the server class and maps the deployment app to it through the DS REST API.
+        Splunk writes the result to this add-on's local/serverclass.conf and the DS applies it at once."""
+        path = f"/deployment/server/serverclasses/{quote(serverclass_name, safe='')}"
+        status, content = ds_rest(session_key, "GET", path)
+        if status == 404:
+            existing, result = [], "New class added"
+        elif status == 200:
+            existing = [v for k, v in sorted(content.items(), key=lambda kv: whitelist_index(kv[0])) if whitelist_index(k) >= 0]
+            result = "existing class updated"
         else:
-            logger.info(f"No new hosts to add for server class {serverclass_name}. Configuration unchanged.")
-            return "no new updates"
-    
+            raise RuntimeError(f"reading server class {serverclass_name} failed: HTTP {status}")
+        new_hosts = [h for h in dict.fromkeys(hosts) if h not in existing]
+        if new_hosts:
+            # A POST replaces the whole whitelist, so send the existing hosts too.
+            whitelist = {f"whitelist.{i}": host for i, host in enumerate(existing + new_hosts)}
+            if existing:
+                status, _ = ds_rest(session_key, "POST", path, **whitelist)
+            else:
+                status, _ = ds_rest(session_key, "POST", "/deployment/server/serverclasses", name=serverclass_name, **whitelist)
+            if status not in (200, 201):
+                raise RuntimeError(f"writing server class {serverclass_name} failed: HTTP {status}")
+            logger.info(f"Server class {serverclass_name}: added hosts {new_hosts} (submitted by {submitted_by})")
+        elif existing:
+            result = "no new updates"
+
+        app_path = f"/deployment/server/applications/{quote(app_name, safe='')}"
+        status, content = ds_rest(session_key, "GET", app_path)
+        if status != 200:
+            raise RuntimeError(f"the DS does not list the deployment app {app_name}: HTTP {status}")
+        if serverclass_name not in (content.get("serverclasses") or []):
+            status, _ = ds_rest(session_key, "POST", app_path, serverclass=serverclass_name,
+                                restartSplunkd="true", stateOnClient="enabled")
+            if status != 200:
+                raise RuntimeError(f"mapping {app_name} to {serverclass_name} failed: HTTP {status}")
+            logger.info(f"Mapped deployment app {app_name} to server class {serverclass_name}")
+        return result
 
     def handle(self, in_string):
 
@@ -335,6 +316,7 @@ stateOnClient = enabled
         try:
             (index_name, message, precedence, my_sourcetypes, app_name, environment, version, my_sources, my_hosts,
              submitted_by) = self.get_values(in_string)
+            session_key = json.loads(in_string).get("system_authtoken")
 
             errors = validation_errors(index_name, message, precedence, my_sourcetypes, app_name,
                                        environment, version, my_sources, my_hosts, submitted_by)
@@ -347,7 +329,8 @@ stateOnClient = enabled
             ###### Update app_name and serverclass name format here ###########
             app_name = PREFIX_MAP[precedence] + environment + "_" + index_name + "_" + app_name
 
-            serverclass_name = f"{app_name}_{index_name}_{my_sourcetypes}"
+            # ':' (allowed in sourcetypes) would break the serverClass:<class>:app:<app> stanza name.
+            serverclass_name = re.sub(r'[^A-Za-z0-9_.-]', '_', f"{app_name}_{index_name}_{my_sourcetypes}")
 
             ###################################################################
 
@@ -364,7 +347,14 @@ stateOnClient = enabled
                         return_payload_string += f"Write config = {config_write_status} written | "
                         
 
-                        serverclass_status = self.compare_and_add_serverclass_whitelist_conf(app_name, serverclass_name, my_hosts, submitted_by)
+                        try:
+                            serverclass_status = self.apply_serverclass(session_key, app_name, serverclass_name,
+                                                                        my_hosts, submitted_by)
+                        except Exception as e:
+                            logger.error(f"Server class update failed: {e}")
+                            serverclass_status = False
+                        if serverclass_status and (config_write_status or serverclass_status != "no new updates"):
+                            queue_reload(serverclass_name)  # clients only see changed app files after a reload
                         if serverclass_status:
                             return_payload_string += f"Write serverclass = {serverclass_status} | "
                         else:

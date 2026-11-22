@@ -11,6 +11,7 @@ sys.modules["splunk"].rest = sys.modules["splunk.rest"]
 HOME = tempfile.mkdtemp()
 os.environ["SPLUNK_HOME"] = HOME
 os.makedirs(os.path.join(HOME, "var", "log", "splunk"))
+import receive_process_payload  # noqa: E402
 from receive_process_payload import MyRestHandler, validation_errors, PENDING_RELOAD  # noqa: E402
 import reload_pending_serverclasses  # noqa: E402
 
@@ -35,9 +36,39 @@ class ValidationTests(unittest.TestCase):
 
 
 
+class FakeDS:
+    """In-memory stand-in for /deployment/server/serverclasses and /applications."""
+    def __init__(self):
+        self.classes, self.apps, self.calls = {}, {}, []
+
+    def __call__(self, key, method, path, **args):
+        self.calls.append((method, path, args))
+        parts = path.strip("/").split("/")  # deployment, server, kind[, name]
+        kind, name = parts[2], (parts[3] if len(parts) > 3 else args.get("name"))
+        if kind == "serverclasses":
+            if method == "GET":
+                return (200, dict(self.classes[name])) if name in self.classes else (404, {})
+            if len(parts) == 3 and name in self.classes:
+                return 409, {}
+            self.classes[name] = {k: v for k, v in args.items() if k.startswith("whitelist.")}
+            return (201 if len(parts) == 3 else 200), {}
+        if not Path(HOME, "etc", "deployment-apps", name).is_dir():
+            return 404, {}
+        app = self.apps.setdefault(name, {"serverclasses": []})
+        if method == "POST":
+            app["serverclasses"].append(args["serverclass"])
+        return 200, dict(app)
+
+
 class HandlerTests(unittest.TestCase):
+    def setUp(self):
+        self.ds = FakeDS()
+        patcher = mock.patch.object(receive_process_payload, "ds_rest", self.ds)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def send(self, body):
-        return MyRestHandler("", "").handle(json.dumps({"payload": json.dumps(body)}))
+        return MyRestHandler("", "").handle(json.dumps({"payload": json.dumps(body), "system_authtoken": "sys"}))
 
     def test_new_hosts_added_when_sources_already_exist(self):
         body = {"message": "RFC1", "precedence": "high", "my_index": "web", "my_sourcetype": "st",
@@ -46,9 +77,9 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(self.send(body)["status"], 200)
         body["my_host"] = ["web02"]
         self.assertEqual(self.send(body)["status"], 200)
-        sc = Path(HOME, "etc", "apps", "input_conf_generator_serverclass", "local", "serverclass.conf").read_text()
-        self.assertIn("web01", sc)
-        self.assertIn("web02", sc)
+        # a POST replaces the whitelist, so the update must carry the old host too
+        self.assertEqual(self.ds.classes["_prod_web_apache_web_st"], {"whitelist.0": "web01", "whitelist.1": "web02"})
+        self.assertEqual(self.ds.apps["_prod_web_apache"]["serverclasses"], ["_prod_web_apache_web_st"])
 
     def test_submitter_is_recorded_and_reload_queued(self):
         PENDING_RELOAD.unlink(missing_ok=True)
@@ -58,8 +89,6 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(self.send(body)["status"], 200)
         inputs = Path(HOME, "etc", "deployment-apps", "y_qa_os_linux", "default", "inputs.conf").read_text()
         self.assertIn("Submitted by : alice", inputs)
-        sc = Path(HOME, "etc", "apps", "input_conf_generator_serverclass", "local", "serverclass.conf").read_text()
-        self.assertIn("by alice", sc)
         self.assertEqual(PENDING_RELOAD.read_text(), "y_qa_os_linux_os_syslog\n")
         # an unchanged resend queues nothing new
         self.send(body)
@@ -75,6 +104,22 @@ class HandlerTests(unittest.TestCase):
         app_conf = Path(HOME, "etc", "deployment-apps", "z_prod_net_fw", "default", "app.conf").read_text()
         self.assertIn("# Version: 1.2.0", app_conf)
         self.assertNotIn("# Version: 1.0.0", app_conf)
+
+    def test_colon_in_sourcetype_is_safe_in_class_name(self):
+        body = {"message": "RFC5", "precedence": "low", "my_index": "os", "my_sourcetype": "linux:audit",
+                "my_source": ["/var/log/audit/audit.log"], "my_host": ["h1"],
+                "additional_metadata": {"app_name": "audit", "environment": "prod"}}
+        self.assertEqual(self.send(body)["status"], 200)
+        self.assertIn("z_prod_os_audit_os_linux_audit", self.ds.classes)
+
+    def test_ds_rest_failure_is_500(self):
+        body = {"message": "RFC6", "precedence": "low", "my_index": "web", "my_sourcetype": "st",
+                "my_source": ["/var/log/c.log"], "my_host": ["web09"],
+                "additional_metadata": {"app_name": "restfail", "environment": "prod"}}
+        with mock.patch.object(receive_process_payload, "ds_rest", return_value=(500, {})):
+            result = self.send(body)
+        self.assertEqual(result["status"], 500)
+        self.assertIn("Write serverclass = failed", result["payload"]["Script_status"])
 
     def test_write_failure_is_reported(self):
         body = {"message": "RFC2", "precedence": "low", "my_index": "web", "my_sourcetype": "st",
