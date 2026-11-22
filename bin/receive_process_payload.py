@@ -222,8 +222,8 @@ class MyRestHandler(PersistentServerConnectionApplication):
                     lines = f.readlines()
                     with open(app_conf_path, 'w') as f:
                         for line in lines:
-                            if line.startswith('version'):
-                                f.write(f'version = {version}\n')
+                            if line.startswith('# Version:'):
+                                f.write(f'# Version: {version}\n')
                                 logger.info(f"Updated version : {version} in app.conf file: {app_conf_path}")
                             elif line.startswith('# Update Date:'):
                                 current_time = dt.now().strftime("%Y-%m-%d %H:%M:%S %Z")

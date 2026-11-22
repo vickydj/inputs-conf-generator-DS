@@ -65,6 +65,17 @@ class HandlerTests(unittest.TestCase):
         self.send(body)
         self.assertEqual(PENDING_RELOAD.read_text(), "y_qa_os_linux_os_syslog\n")
 
+    def test_resend_updates_version_in_app_conf(self):
+        body = {"message": "RFC4", "precedence": "low", "my_index": "net", "my_sourcetype": "fw",
+                "my_source": ["/var/log/fw.log"], "my_host": ["fw01"],
+                "additional_metadata": {"app_name": "fw", "environment": "prod", "version": "1.0.0"}}
+        self.send(body)
+        body["additional_metadata"]["version"] = "1.2.0"
+        self.send(body)
+        app_conf = Path(HOME, "etc", "deployment-apps", "z_prod_net_fw", "default", "app.conf").read_text()
+        self.assertIn("# Version: 1.2.0", app_conf)
+        self.assertNotIn("# Version: 1.0.0", app_conf)
+
     def test_write_failure_is_reported(self):
         body = {"message": "RFC2", "precedence": "low", "my_index": "web", "my_sourcetype": "st",
                 "my_source": ["/var/log/b.log"], "my_host": ["web03"],
