@@ -104,12 +104,22 @@ Developer supported. Open an issue at <https://github.com/vickydj/inputs-conf-ge
 
 ## Development
 
-`python3 -m unittest discover -s tests` runs the tests. Every pull request runs `.github/workflows/validate.yml`.
-It fails if:
-- a test fails;
-- `local/`, `local.meta`, `*.backup`, a token, a `$7$` secret or a private key is committed;
-- a REST endpoint skips authentication, `web.conf` exposes an endpoint, or Python turns off TLS verification;
-- Splunk AppInspect (precert) reports any failure.
+| What | Where | When |
+|---|---|---|
+| Lint: committed `local/`, `local.meta`, `*.backup`, bytecode, tokens, `$7$` secrets or private keys; REST endpoints without authentication; Python that turns off TLS verification | `ci/lint.sh` | pre-push hook, CI |
+| Tests | `tests/` (`python3 -m unittest discover -s tests`) | pre-push hook, CI |
+| Package for Splunkbase (from the files git tracks; no tests, CI files or dotfiles) | `ci/build.sh` → `dist/` | CI |
+| Splunk AppInspect (Splunkbase + Cloud checks) and the Packaging Toolkit (`slim validate`) | `ci/check.sh` | CI |
+
+- **Pull requests and pushes to `master`** run `.github/workflows/validate.yml`. It uploads the package and the
+  AppInspect report as a build artifact. Make **Validate Splunk app** a required status check on `master`.
+- **Releases**: bump the version in `default/app.conf` (`[launcher]` and `[id]`), add a
+  `### <version>` section to the release notes below, merge, then `git tag v<version> && git push origin v<version>`.
+  `.github/workflows/release.yml` checks the tag matches the app version, builds and checks the package, and
+  publishes a GitHub release with the package, `SHA256SUMS` and the AppInspect report. Upload that package to
+  Splunkbase.
+- **Pre-push hook**: enable once per clone with `git config core.hooksPath ci/hooks`. It runs the lint and the
+  tests (about a second). `git push --no-verify` skips it.
 
 ## Release notes
 

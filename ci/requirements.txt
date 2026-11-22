@@ -1,0 +1,4 @@
+# CI tools (validate.yml, release.yml). requests: the code imports it; Splunk ships it.
+splunk-appinspect==4.4.0
+splunk-packaging-toolkit==1.2.8
+requests
